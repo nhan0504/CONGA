@@ -1,0 +1,73 @@
+# ------------------------------
+# Build artifacts
+# ------------------------------
+htsim
+*.o
+*.obj
+*.so
+*.a
+*.out
+*.exe
+*.dll
+*.dylib
+
+# Intermediate build dirs
+.obj/
+.d/
+build/
+bin/
+lib/
+tmp/
+CMakeFiles/
+
+# Dependency / metadata files
+*.dSYM/
+*.depend
+*.dep
+*.log
+*.map
+
+# ------------------------------
+# Editor / OS junk
+# ------------------------------
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.code-workspace
+
+# ------------------------------
+# Data / experiment output
+# ------------------------------
+data/
+results/
+logs/
+*.trace
+*.csv
+*.txt
+*.dat
+*.pdf
+*.png
+
+# Keep documentation and scripts
+!README*
+!*.md
+!*.sh
+!*.py
+!Makefile
+
+# ------------------------------
+# Optional additions
+# ------------------------------
+# Ignore local test configs
+*.conf
+*.json
+*.yml
+*.yaml
+
+# Ignore generated temporary files
+core
+*.core
