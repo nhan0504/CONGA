@@ -2,6 +2,7 @@
  * FIFO queue
  */
 #include "queue.h"
+#include "datapacket.h"
 #include "prof.h"
 
 using namespace std;
@@ -57,6 +58,14 @@ Queue::doNextEvent()
 void
 Queue::receivePacket(Packet &pkt) 
 {
+    // CONGA: Add congestion metric when packet enters queue
+    DataPacket* dataPkt = dynamic_cast<DataPacket*>(&pkt);
+    if (dataPkt && !dataPkt->isFeedback()) {
+        // Add current queue occupancy to packet's congestion metric
+        dataPkt->addCongestion(_queuesize);
+    }
+    
+    
     if (_queuesize + pkt.size() > _maxsize) {
         if (_logger) {
             _logger->logQueue(*this, QueueLogger::PKT_DROP, pkt);

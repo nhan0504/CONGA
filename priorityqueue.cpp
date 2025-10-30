@@ -1,4 +1,5 @@
 #include "priorityqueue.h"
+#include "datapacket.h"
 
 #define TRACE_PKT 0 && 4304
 
@@ -55,6 +56,14 @@ PriorityQueue::completeService()
 void
 PriorityQueue::receivePacket(Packet& pkt) 
 {
+    // CONGA: Add congestion metric when packet enters queue
+    DataPacket* dataPkt = dynamic_cast<DataPacket*>(&pkt);
+    if (dataPkt && !dataPkt->isFeedback()) {
+        // Add current queue occupancy to packet's congestion metric
+        dataPkt->addCongestion(_queuesize);
+    }
+    
+    
     pkt.flow().logTraffic(pkt, *this, TrafficLogger::PKT_ARRIVE);
     bool queueWasEmpty = (_currentPkt == NULL) && _packets.empty();
 
