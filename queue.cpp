@@ -102,6 +102,7 @@ Queue::applyEcnMark(Packet &pkt)
 void
 Queue::printStats()
 {
+    return; // Disable for now
     unordered_map<uint32_t, uint32_t> counts;
 
     for (auto const& i : _enqueued) {

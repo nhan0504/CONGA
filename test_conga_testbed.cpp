@@ -1,286 +1,287 @@
+// test_conga_testbed.cpp
+#include <vector>
+#include <random>
+#include <string>
+#include <cmath>
 #include "eventlist.h"
 #include "logfile.h"
 #include "loggers.h"
-#include "aprx-fairqueue.h"
+#include "queue.h"
 #include "fairqueue.h"
 #include "priorityqueue.h"
+#include "aprx-fairqueue.h"
 #include "stoc-fairqueue.h"
-#include "flow-generator.h"
 #include "pipe.h"
 #include "leafswitch.h"
+#include "flow-generator.h"
 #include "test.h"
-#include <vector>
-
-namespace conga {
-    // Testbed configuration
-    const int N_CORE = 12;
-    const int N_LEAF = 24;
-    const int N_SERVER = 32;   // Per leaf
-
-    const uint64_t LEAF_BUFFER = 512000;
-    const uint64_t CORE_BUFFER = 1024000;
-    const uint64_t ENDH_BUFFER = 8192000;
-
-    const uint64_t LEAF_SPEED = 10000000000;  // 10Gbps
-    const uint64_t CORE_SPEED = 40000000000;  // 40Gbps
-    const uint64_t LINK_DELAY = 1;            // 1us
-    
-    // Network topology structure
-    struct NetworkTopology {
-        std::vector<LeafSwitch*> leafSwitches;
-        
-        // Core uplink queues: [leaf][core] -> queue/pipe
-        std::vector<std::vector<Queue*>> leafToCore_queues;
-        std::vector<std::vector<Pipe*>> leafToCore_pipes;
-        
-        // Core downlink queues: [core][leaf] -> queue/pipe
-        std::vector<std::vector<Queue*>> coreToLeaf_queues;
-        std::vector<std::vector<Pipe*>> coreToLeaf_pipes;
-        
-        // Server connections: [leaf][server] -> queue/pipe
-        std::vector<std::vector<Queue*>> leafToServer_queues;
-        std::vector<std::vector<Pipe*>> leafToServer_pipes;
-        std::vector<std::vector<Queue*>> serverToLeaf_queues;
-        std::vector<std::vector<Pipe*>> serverToLeaf_pipes;
-        
-        // Mapping: serverId -> leafId
-        std::vector<uint32_t> serverToLeafMap;
-    };
-    
-    NetworkTopology topology;
-}
 
 using namespace std;
-using namespace conga;
 
-// Helper function to create queue based on type
-Queue* createQueue(const string& queueType, uint64_t speed, uint64_t buffer, 
-                   QueueLoggerSampling* logger, const string& name, Logfile& logfile) {
-    Queue* queue;
-    
-    if (queueType == "fq") {
-        queue = new FairQueue(speed, buffer, logger);
-    } else if (queueType == "pq") {
-        queue = new PriorityQueue(speed, buffer, logger);
-    } else {
-        queue = new Queue(speed, buffer, logger);
-    }
-    
-    queue->setName(name);
-    logfile.writeName(*queue);
-    return queue;
+namespace conga_conf {
+    static const int N_CORE   = 12;
+    static const int N_LEAF   = 24;
+    static const int N_SERVER = 32;   // per leaf
+
+    static const uint64_t LEAF_BUFFER = 512000;
+    static const uint64_t CORE_BUFFER = 1024000;
+    static const uint64_t ENDH_BUFFER = 8192000;
+
+    static const uint64_t LEAF_SPEED  = 10000000000ULL; // 10G
+    static const uint64_t CORE_SPEED  = 40000000000ULL; // 40G
+    static const uint64_t LINK_DELAY_US = 1;
+
+    struct Topo {
+        vector<LeafSwitch*> leafSwitches;
+
+        // [leaf][core]
+        vector<vector<Queue*>> leafToCoreQ;
+        vector<vector<Pipe*>>  leafToCoreP;
+
+        // [core][leaf]
+        vector<vector<Queue*>> coreToLeafQ;
+        vector<vector<Pipe*>>  coreToLeafP;
+
+        // [leaf][serverLocal]
+        vector<vector<Queue*>> leafToServerQ;
+        vector<vector<Pipe*>>  leafToServerP;
+        vector<vector<Queue*>> serverToLeafQ;
+        vector<vector<Pipe*>>  serverToLeafP;
+
+        vector<uint32_t> serverToLeafMap;
+    };
+
+    static Topo topo;
 }
 
-// Helper to get leaf ID for a server
-uint32_t getLeafForServer(uint32_t serverId) {
-    return serverId / N_SERVER;  // Each leaf has N_SERVER servers
+static inline uint32_t getLeafForServer(uint32_t sid) {
+    return sid / conga_conf::N_SERVER;
+}
+static inline uint32_t getLocalServerIndex(uint32_t sid) {
+    return sid % conga_conf::N_SERVER;
 }
 
-// Helper to get local server index on a leaf
-uint32_t getLocalServerIndex(uint32_t serverId) {
-    return serverId % N_SERVER;
+static Queue* makeQueue(const string& qtype,
+                        uint64_t speed,
+                        uint64_t buffer,
+                        QueueLogger* qlog,
+                        const string& name,
+                        Logfile& logfile)
+{
+    Queue* q = nullptr;
+    if (qtype == "fq")      q = new FairQueue(speed, buffer, qlog);
+    else if (qtype == "pq") q = new PriorityQueue(speed, buffer, qlog);
+    else if (qtype == "sfq")q = new StocFairQueue(speed, buffer, qlog);
+    else if (qtype == "afq")q = new AprxFairQueue(speed, buffer, qlog);
+    else                    q = new Queue(speed, buffer, qlog); // droptail
+    q->setName(name);
+    logfile.writeName(*q);
+    return q;
 }
 
-// Route generation for CONGA
-void generateCongaRoute(route_t *&fwd, route_t *&rev, uint32_t &src, uint32_t &dst) {
-    // Determine source and destination leaves
+// global policy flag set from args: "ecmp" (default) or "conga"
+static string g_policy = "conga";
+
+// Route gen uses policy:
+static void route_gen(route_t *&fwd, route_t *&rev, uint32_t &src, uint32_t &dst)
+{
+    using namespace conga_conf;
+    static std::mt19937 rng(0xC0A6A5u);
+
+    const uint32_t TOTAL_SERVERS = N_LEAF * N_SERVER;
+    auto pick_pair = [&]() {
+        std::uniform_int_distribution<uint32_t> U(0, TOTAL_SERVERS - 1);
+        src = U(rng);
+        do { dst = U(rng); } while (dst == src);
+    };
+    if (src >= TOTAL_SERVERS || dst >= TOTAL_SERVERS || src == dst) pick_pair();
+
     uint32_t srcLeaf = getLeafForServer(src);
     uint32_t dstLeaf = getLeafForServer(dst);
-    
+    uint32_t localSrc = getLocalServerIndex(src);
+    uint32_t localDst = getLocalServerIndex(dst);
+
     fwd = new route_t();
     rev = new route_t();
-    
+
     if (srcLeaf == dstLeaf) {
-        // Same rack communication - direct path
-        uint32_t localSrc = getLocalServerIndex(src);
-        uint32_t localDst = getLocalServerIndex(dst);
-        
-        // Server -> Leaf -> Server
-        fwd->push_back(topology.serverToLeaf_queues[srcLeaf][localSrc]);
-        fwd->push_back(topology.serverToLeaf_pipes[srcLeaf][localSrc]);
-        fwd->push_back(topology.leafToServer_queues[dstLeaf][localDst]);
-        fwd->push_back(topology.leafToServer_pipes[dstLeaf][localDst]);
-        
-        // Reverse
-        rev->push_back(topology.serverToLeaf_queues[dstLeaf][localDst]);
-        rev->push_back(topology.serverToLeaf_pipes[dstLeaf][localDst]);
-        rev->push_back(topology.leafToServer_queues[srcLeaf][localSrc]);
-        rev->push_back(topology.leafToServer_pipes[srcLeaf][localSrc]);
-    } else {
-        // Cross-rack communication - need to go through core
-        // CONGA will select which core switch to use dynamically
-        
-        // For now, use a hash-based selection (will be overridden by CONGA logic)
-        uint32_t selectedCore = (src + dst) % N_CORE;
-        uint32_t localSrc = getLocalServerIndex(src);
-        uint32_t localDst = getLocalServerIndex(dst);
-        
-        // Forward: Server -> SrcLeaf -> Core -> DstLeaf -> Server
-        fwd->push_back(topology.serverToLeaf_queues[srcLeaf][localSrc]);
-        fwd->push_back(topology.serverToLeaf_pipes[srcLeaf][localSrc]);
-        fwd->push_back(topology.leafToCore_queues[srcLeaf][selectedCore]);
-        fwd->push_back(topology.leafToCore_pipes[srcLeaf][selectedCore]);
-        fwd->push_back(topology.coreToLeaf_queues[selectedCore][dstLeaf]);
-        fwd->push_back(topology.coreToLeaf_pipes[selectedCore][dstLeaf]);
-        fwd->push_back(topology.leafToServer_queues[dstLeaf][localDst]);
-        fwd->push_back(topology.leafToServer_pipes[dstLeaf][localDst]);
-        
-        // Reverse path
-        rev->push_back(topology.serverToLeaf_queues[dstLeaf][localDst]);
-        rev->push_back(topology.serverToLeaf_pipes[dstLeaf][localDst]);
-        rev->push_back(topology.leafToCore_queues[dstLeaf][selectedCore]);
-        rev->push_back(topology.leafToCore_pipes[dstLeaf][selectedCore]);
-        rev->push_back(topology.coreToLeaf_queues[selectedCore][srcLeaf]);
-        rev->push_back(topology.coreToLeaf_pipes[selectedCore][srcLeaf]);
-        rev->push_back(topology.leafToServer_queues[srcLeaf][localSrc]);
-        rev->push_back(topology.leafToServer_pipes[srcLeaf][localSrc]);
+        // Same rack
+        fwd->push_back(conga_conf::topo.serverToLeafQ[srcLeaf][localSrc]);
+        fwd->push_back(conga_conf::topo.serverToLeafP[srcLeaf][localSrc]);
+        fwd->push_back(conga_conf::topo.leafToServerQ[dstLeaf][localDst]);
+        fwd->push_back(conga_conf::topo.leafToServerP[dstLeaf][localDst]);
+
+        rev->push_back(conga_conf::topo.serverToLeafQ[dstLeaf][localDst]);
+        rev->push_back(conga_conf::topo.serverToLeafP[dstLeaf][localDst]);
+        rev->push_back(conga_conf::topo.leafToServerQ[srcLeaf][localSrc]);
+        rev->push_back(conga_conf::topo.leafToServerP[srcLeaf][localSrc]);
+        return;
     }
+
+    // Choose core by policy
+    uint32_t chosenCore = 0;
+    if (g_policy == "conga") {
+        chosenCore = conga_conf::topo.leafSwitches[srcLeaf]->chooseCore(dstLeaf);
+    } else {
+        // ECMP-ish hash
+        chosenCore = (src * 1315423911u + dst) % N_CORE;
+    }
+
+    // FWD
+    fwd->push_back(conga_conf::topo.serverToLeafQ[srcLeaf][localSrc]);
+    fwd->push_back(conga_conf::topo.serverToLeafP[srcLeaf][localSrc]);
+
+    fwd->push_back(conga_conf::topo.leafToCoreQ[srcLeaf][chosenCore]);
+    fwd->push_back(conga_conf::topo.leafToCoreP[srcLeaf][chosenCore]);
+
+    fwd->push_back(conga_conf::topo.coreToLeafQ[chosenCore][dstLeaf]);
+    fwd->push_back(conga_conf::topo.coreToLeafP[chosenCore][dstLeaf]);
+
+    fwd->push_back(conga_conf::topo.leafToServerQ[dstLeaf][localDst]);
+    fwd->push_back(conga_conf::topo.leafToServerP[dstLeaf][localDst]);
+
+    // REV
+    rev->push_back(conga_conf::topo.serverToLeafQ[dstLeaf][localDst]);
+    rev->push_back(conga_conf::topo.serverToLeafP[dstLeaf][localDst]);
+
+    rev->push_back(conga_conf::topo.leafToCoreQ[dstLeaf][chosenCore]);
+    rev->push_back(conga_conf::topo.leafToCoreP[dstLeaf][chosenCore]);
+
+    rev->push_back(conga_conf::topo.coreToLeafQ[chosenCore][srcLeaf]);
+    rev->push_back(conga_conf::topo.coreToLeafP[chosenCore][srcLeaf]);
+
+    rev->push_back(conga_conf::topo.leafToServerQ[srcLeaf][localSrc]);
+    rev->push_back(conga_conf::topo.leafToServerP[srcLeaf][localSrc]);
 }
 
 void conga_testbed(const ArgList &args, Logfile &logfile)
 {
-    // Parse arguments
-    uint32_t Duration = 10;
-    double Utilization = 0.5;
-    uint32_t AvgFlowSize = 100000;
-    string FlowDist = "uniform";
-    string QueueType = "droptail";
-    string EndHost = "tcp";
-    
+    using namespace conga_conf;
+
+    uint32_t Duration    = 10;
+    double   Util        = 0.2;
+    uint32_t AvgFlowSize = 131072; // 128KB
+    string   FlowDist    = "uniform";
+    string   QueueType   = "droptail";
+    string   EndHost     = "tcp";
     parseInt(args, "duration", Duration);
-    parseDouble(args, "utilization", Utilization);
+    parseDouble(args, "utilization", Util);
     parseInt(args, "flowsize", AvgFlowSize);
     parseString(args, "flowdist", FlowDist);
     parseString(args, "queue", QueueType);
     parseString(args, "endhost", EndHost);
-    
-    // Setup logging
-    QueueLoggerSampling *qs = new QueueLoggerSampling(timeFromUs(1000));
-    logfile.addLogger(*qs);
-    
-    TcpLoggerSimple *logTcp = new TcpLoggerSimple();
+    parseString(args, "policy",  g_policy); // "conga" (default) or "ecmp"
+
+    // TCP logger for FCTs
+    auto *logTcp = new TcpLoggerSimple();
     logfile.addLogger(*logTcp);
-    
-    // Initialize topology structures
-    topology.leafToCore_queues.resize(N_LEAF);
-    topology.leafToCore_pipes.resize(N_LEAF);
-    topology.coreToLeaf_queues.resize(N_CORE);
-    topology.coreToLeaf_pipes.resize(N_CORE);
-    topology.leafToServer_queues.resize(N_LEAF);
-    topology.leafToServer_pipes.resize(N_LEAF);
-    topology.serverToLeaf_queues.resize(N_LEAF);
-    topology.serverToLeaf_pipes.resize(N_LEAF);
-    topology.serverToLeafMap.resize(N_LEAF * N_SERVER);
-    
-    for (int i = 0; i < N_LEAF; i++) {
-        topology.leafToCore_queues[i].resize(N_CORE);
-        topology.leafToCore_pipes[i].resize(N_CORE);
-        topology.leafToServer_queues[i].resize(N_SERVER);
-        topology.leafToServer_pipes[i].resize(N_SERVER);
-        topology.serverToLeaf_queues[i].resize(N_SERVER);
-        topology.serverToLeaf_pipes[i].resize(N_SERVER);
-    }
-    
-    for (int i = 0; i < N_CORE; i++) {
-        topology.coreToLeaf_queues[i].resize(N_LEAF);
-        topology.coreToLeaf_pipes[i].resize(N_LEAF);
-    }
-    
+
+    // Allocate topology matrices
+    topo.leafToCoreQ.assign(N_LEAF, vector<Queue*>(N_CORE, nullptr));
+    topo.leafToCoreP.assign(N_LEAF, vector<Pipe*>(N_CORE, nullptr));
+    topo.coreToLeafQ.assign(N_CORE, vector<Queue*>(N_LEAF, nullptr));
+    topo.coreToLeafP.assign(N_CORE, vector<Pipe*>(N_LEAF, nullptr));
+    topo.leafToServerQ.assign(N_LEAF, vector<Queue*>(N_SERVER, nullptr));
+    topo.leafToServerP.assign(N_LEAF, vector<Pipe*>(N_SERVER, nullptr));
+    topo.serverToLeafQ.assign(N_LEAF, vector<Queue*>(N_SERVER, nullptr));
+    topo.serverToLeafP.assign(N_LEAF, vector<Pipe*>(N_SERVER, nullptr));
+    topo.serverToLeafMap.resize(N_LEAF * N_SERVER);
+
     // Create leaf switches
-    for (int leaf = 0; leaf < N_LEAF; leaf++) {
-        LeafSwitch* leafSwitch = new LeafSwitch(leaf, N_CORE, EventList::Get());
-        topology.leafSwitches.push_back(leafSwitch);
+    topo.leafSwitches.reserve(N_LEAF);
+    for (int leaf = 0; leaf < N_LEAF; ++leaf) {
+        auto *lsw = new LeafSwitch(leaf, N_CORE, N_LEAF, EventList::Get());
+        lsw->setAlpha(0.25);
+        lsw->setSamplingPeriod(timeFromUs(50));
+        topo.leafSwitches.push_back(lsw);
     }
-    
-    // Create core layer connections (leaf <-> core)
-    for (int leaf = 0; leaf < N_LEAF; leaf++) {
-        for (int core = 0; core < N_CORE; core++) {
-            // Leaf -> Core (uplink)
-            string queueName = "L" + to_string(leaf) + "_C" + to_string(core) + "_up";
-            topology.leafToCore_queues[leaf][core] = createQueue(
-                QueueType, CORE_SPEED, LEAF_BUFFER, qs, queueName, logfile);
-            
-            string pipeName = "pipe_L" + to_string(leaf) + "_C" + to_string(core) + "_up";
-            topology.leafToCore_pipes[leaf][core] = new Pipe(timeFromUs(LINK_DELAY));
-            topology.leafToCore_pipes[leaf][core]->setName(pipeName);
-            logfile.writeName(*topology.leafToCore_pipes[leaf][core]);
-            
-            // Core -> Leaf (downlink)
-            queueName = "C" + to_string(core) + "_L" + to_string(leaf) + "_down";
-            topology.coreToLeaf_queues[core][leaf] = createQueue(
-                QueueType, CORE_SPEED, CORE_BUFFER, qs, queueName, logfile);
-            
-            pipeName = "pipe_C" + to_string(core) + "_L" + to_string(leaf) + "_down";
-            topology.coreToLeaf_pipes[core][leaf] = new Pipe(timeFromUs(LINK_DELAY));
-            topology.coreToLeaf_pipes[core][leaf]->setName(pipeName);
-            logfile.writeName(*topology.coreToLeaf_pipes[core][leaf]);
-            
-            // Register uplink with leaf switch
-            topology.leafSwitches[leaf]->addUplink(
-                core, 
-                topology.leafToCore_queues[leaf][core],
-                topology.leafToCore_pipes[leaf][core]
-            );
+
+    // Leaf <-> Core wiring
+    for (int leaf = 0; leaf < N_LEAF; ++leaf) {
+        for (int core = 0; core < N_CORE; ++core) {
+            // uplink leaf->core
+            {
+                string qn = "L" + to_string(leaf) + "_C" + to_string(core) + "_up";
+                topo.leafToCoreQ[leaf][core] = makeQueue(QueueType, CORE_SPEED, LEAF_BUFFER, nullptr, qn, logfile);
+                string pn = "pipe_L" + to_string(leaf) + "_C" + to_string(core) + "_up";
+                topo.leafToCoreP[leaf][core] = new Pipe(timeFromUs(LINK_DELAY_US));
+                topo.leafToCoreP[leaf][core]->setName(pn); logfile.writeName(*topo.leafToCoreP[leaf][core]);
+
+                topo.leafSwitches[leaf]->addUplink(core, topo.leafToCoreQ[leaf][core], topo.leafToCoreP[leaf][core]);
+            }
+            // downlink core->leaf
+            {
+                string qn = "C" + to_string(core) + "_L" + to_string(leaf) + "_down";
+                topo.coreToLeafQ[core][leaf] = makeQueue(QueueType, CORE_SPEED, CORE_BUFFER, nullptr, qn, logfile);
+                string pn = "pipe_C" + to_string(core) + "_L" + to_string(leaf) + "_down";
+                topo.coreToLeafP[core][leaf] = new Pipe(timeFromUs(LINK_DELAY_US));
+                topo.coreToLeafP[core][leaf]->setName(pn); logfile.writeName(*topo.coreToLeafP[core][leaf]);
+            }
         }
     }
 
-    // Create server connections
-    for (int leaf = 0; leaf < N_LEAF; leaf++) {
-        for (int server = 0; server < N_SERVER; server++) {
-            uint32_t globalServerId = leaf * N_SERVER + server;
-            topology.serverToLeafMap[globalServerId] = leaf;
-            
-            // Server -> Leaf
-            string queueName = "S" + to_string(globalServerId) + "_L" + to_string(leaf);
-            topology.serverToLeaf_queues[leaf][server] = createQueue(
-                QueueType, LEAF_SPEED, ENDH_BUFFER, NULL, queueName, logfile);
-            
-            string pipeName = "pipe_S" + to_string(globalServerId) + "_L" + to_string(leaf);
-            topology.serverToLeaf_pipes[leaf][server] = new Pipe(timeFromUs(LINK_DELAY));
-            topology.serverToLeaf_pipes[leaf][server]->setName(pipeName);
-            logfile.writeName(*topology.serverToLeaf_pipes[leaf][server]);
-            
-            // Leaf -> Server
-            queueName = "L" + to_string(leaf) + "_S" + to_string(globalServerId);
-            topology.leafToServer_queues[leaf][server] = createQueue(
-                QueueType, LEAF_SPEED, LEAF_BUFFER, NULL, queueName, logfile);
-            
-            pipeName = "pipe_L" + to_string(leaf) + "_S" + to_string(globalServerId);
-            topology.leafToServer_pipes[leaf][server] = new Pipe(timeFromUs(LINK_DELAY));
-            topology.leafToServer_pipes[leaf][server]->setName(pipeName);
-            logfile.writeName(*topology.leafToServer_pipes[leaf][server]);
-            
-            // Register downlink with leaf switch
-            topology.leafSwitches[leaf]->addDownlink(
-                globalServerId,
-                topology.leafToServer_queues[leaf][server],
-                topology.leafToServer_pipes[leaf][server]
-            );
+    // Register remote core->leaf queues with each leaf (to compute dst path metric)
+    for (int leaf = 0; leaf < N_LEAF; ++leaf) {
+        for (int dstLeaf = 0; dstLeaf < N_LEAF; ++dstLeaf) {
+            for (int core = 0; core < N_CORE; ++core) {
+                topo.leafSwitches[leaf]->registerCoreToLeaf(core, dstLeaf,
+                    topo.coreToLeafQ[core][dstLeaf],
+                    topo.coreToLeafP[core][dstLeaf]);
+            }
         }
     }
 
-    // Setup flow generator
+    // Leaf <-> Servers
+    for (int leaf = 0; leaf < N_LEAF; ++leaf) {
+        for (int s = 0; s < N_SERVER; ++s) {
+            uint32_t gsid = leaf * N_SERVER + s;
+            topo.serverToLeafMap[gsid] = leaf;
+
+            // server->leaf
+            {
+                string qn = "S" + to_string(gsid) + "_L" + to_string(leaf) + "_up";
+                topo.serverToLeafQ[leaf][s] = makeQueue(QueueType, LEAF_SPEED, ENDH_BUFFER, nullptr, qn, logfile);
+                string pn = "pipe_S" + to_string(gsid) + "_L" + to_string(leaf) + "_up";
+                topo.serverToLeafP[leaf][s] = new Pipe(timeFromUs(LINK_DELAY_US));
+                topo.serverToLeafP[leaf][s]->setName(pn); logfile.writeName(*topo.serverToLeafP[leaf][s]);
+            }
+            // leaf->server
+            {
+                string qn = "L" + to_string(leaf) + "_S" + to_string(gsid) + "_down";
+                topo.leafToServerQ[leaf][s] = makeQueue(QueueType, LEAF_SPEED, LEAF_BUFFER, nullptr, qn, logfile);
+                string pn = "pipe_L" + to_string(leaf) + "_S" + to_string(gsid) + "_down";
+                topo.leafToServerP[leaf][s] = new Pipe(timeFromUs(LINK_DELAY_US));
+                topo.leafToServerP[leaf][s]->setName(pn); logfile.writeName(*topo.leafToServerP[leaf][s]);
+            }
+            topo.leafSwitches[leaf]->addDownlink(gsid, topo.leafToServerQ[leaf][s], topo.leafToServerP[leaf][s]);
+        }
+    }
+
+    // Flow generator
     DataSource::EndHost eh = DataSource::TCP;
-    if (EndHost == "dctcp") {
-        eh = DataSource::DCTCP;
-    }
-    
+    if (EndHost == "dctcp") eh = DataSource::DCTCP;
+
     Workloads::FlowDist fd = Workloads::UNIFORM;
-    if (FlowDist == "pareto") {
+    if (FlowDist == "pareto") fd = Workloads::PARETO;
+    else if (FlowDist == "datamining") fd = Workloads::DATAMINING;
+    else if (FlowDist == "enterprise") {
+        // If your tree has ENTERPRISE, use it; otherwise map to PARETO:
+        #ifdef WORKLOADS_HAS_ENTERPRISE
+        fd = Workloads::ENTERPRISE;
+        #else
         fd = Workloads::PARETO;
-    } else if (FlowDist == "datamining") {
-        fd = Workloads::DATAMINING;
+        #endif
     }
-    
-    // Calculate aggregate capacity (all server-facing links)
-    uint64_t totalCapacity = N_LEAF * N_SERVER * LEAF_SPEED;
-    linkspeed_bps flowRate = llround(totalCapacity * Utilization);
-    
-    FlowGenerator *flowGen = new FlowGenerator(
-        eh, generateCongaRoute, flowRate, AvgFlowSize, fd);
-    
+
+    const uint64_t TOTAL_HOST_LINKS = (uint64_t)N_LEAF * (uint64_t)N_SERVER;
+    const long double totalCapacity = (long double)TOTAL_HOST_LINKS * (long double)LEAF_SPEED;
+    linkspeed_bps flowRate = llround(totalCapacity * Util);
+    flowRate = llround(flowRate * 0.001);
+
+    auto *flowGen = new FlowGenerator(eh, route_gen, flowRate, AvgFlowSize, fd);
     flowGen->setEndhostQueue(LEAF_SPEED, ENDH_BUFFER);
-    flowGen->setTimeLimits(0, timeFromSec(Duration) - 1);
-    
+    flowGen->setPrefix(g_policy + "-");
+    flowGen->setTimeLimits(0, timeFromSec(Duration)); // schedules itself
+
     EventList::Get().setEndtime(timeFromSec(Duration));
 }

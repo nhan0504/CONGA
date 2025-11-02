@@ -52,14 +52,14 @@ TcpSrc::printStatus()
         estimated_fct = 0;
     }
 
-    cout << setprecision(6) << "LiveFlow " << str() << " size " << _flowsize
-         << " start " << lround(timeAsUs(_start_time))
-         << " endBytes " << _last_acked
-         << " fct " << timeAsUs(estimated_fct)
-         << " sent " << _highest_sent << " " << _packets_sent - _highest_sent
-         << " rate " << _last_acked * 8000.0 / (current_ts - _start_time)
-         << " cwnd " << _cwnd
-         << " alpha " << _alpha << endl;
+    // cout << setprecision(6) << "LiveFlow " << str() << " size " << _flowsize
+    //      << " start " << lround(timeAsUs(_start_time))
+    //      << " endBytes " << _last_acked
+    //      << " fct " << timeAsUs(estimated_fct)
+    //      << " sent " << _highest_sent << " " << _packets_sent - _highest_sent
+    //      << " rate " << _last_acked * 8000.0 / (current_ts - _start_time)
+    //      << " cwnd " << _cwnd
+    //      << " alpha " << _alpha << endl;
 }
 
 void
@@ -91,14 +91,14 @@ TcpSrc::doNextEvent()
     // Retransmission timeout.
     else if (_RFC2988_RTO_timeout != 0 && current_ts >= _RFC2988_RTO_timeout) {
 
-        cout << str() << " at " << timeAsMs(current_ts)
-             << " RTO " << timeAsUs(_rto)
-             << " MDEV " << timeAsUs(_mdev)
-             << " RTT "<< timeAsUs(_rtt)
-             << " SEQ " << _last_acked / MSS_BYTES
-             << " CWND "<< _cwnd / MSS_BYTES
-             << " RTO_timeout " << timeAsMs(_RFC2988_RTO_timeout)
-             << " STATE " << _state << endl;
+        // cout << str() << " at " << timeAsMs(current_ts)
+        //      << " RTO " << timeAsUs(_rto)
+        //      << " MDEV " << timeAsUs(_mdev)
+        //      << " RTT "<< timeAsUs(_rtt)
+        //      << " SEQ " << _last_acked / MSS_BYTES
+        //      << " CWND "<< _cwnd / MSS_BYTES
+        //      << " RTO_timeout " << timeAsMs(_RFC2988_RTO_timeout)
+        //      << " STATE " << _state << endl;
 
         if (_logger) _logger->logTcp(*this, TcpLogger::TCP_TIMEOUT);
 
@@ -168,12 +168,12 @@ TcpSrc::receivePacket(Packet &pkt)
 
     // Delayed / reordered ack. Shouldn't happen for simple queues.
     if (seqno < _last_acked) {
-        cout << "ACK from the past: seqno " << seqno << " _last_acked " << _last_acked << endl;
+        // cout << "ACK from the past: seqno " << seqno << " _last_acked " << _last_acked << endl;
         return;
     }
 
     if (TRACE_FLOW == str()) {
-        cout << str() << " RECV " << EventList::Get().now() << " " << seqno << endl;
+        // cout << str() << " RECV " << EventList::Get().now() << " " << seqno << endl;
     }
 
     // Update rtt and update _rto.
@@ -371,7 +371,7 @@ TcpSrc::sendPackets()
     }
 
     if (TRACE_FLOW == str()) {
-        cout << str() << " SEND " << current_ts << " " << _highest_sent << " " << _cwnd << endl;
+        // cout << str() << " SEND " << current_ts << " " << _highest_sent << " " << _cwnd << endl;
     }
 
     while (_last_acked + _cwnd >= _highest_sent + MSS_BYTES) {
@@ -428,7 +428,7 @@ void
 TcpSrc::retransmitPacket(int reason)
 {
     if (TRACE_FLOW == str()) {
-        cout << str() << " RETX " << EventList::Get().now() << " " << reason << endl;
+        // cout << str() << " RETX " << EventList::Get().now() << " " << reason << endl;
     }
 
     DataPacket *p = DataPacket::newpkt(_flow, *_route_fwd, _last_acked + 1, MSS_BYTES);
