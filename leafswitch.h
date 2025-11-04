@@ -2,16 +2,11 @@
 #pragma once
 #include <vector>
 #include <cstdint>
-#include <string>
+#include <random>
 #include "eventlist.h"
 #include "queue.h"
 #include "pipe.h"
 
-/**
- * Simplified LeafSwitch class for CONGA simulation.
- * Each leaf maintains congestion metrics per destination leaf and core uplink.
- * It periodically samples queue occupancies to emulate CONGA feedback.
- */
 class LeafSwitch : public EventSource {
 public:
     LeafSwitch(uint32_t leaf_id,
@@ -19,43 +14,49 @@ public:
                uint32_t n_leaves,
                EventList& ev);
 
-    // Connectors
     void addUplink(uint32_t core, Queue* q_leaf_to_core, Pipe* p_leaf_to_core);
-    void addDownlink(uint32_t server_global_id, Queue* q_leaf_to_server, Pipe* p_leaf_to_server);
+    void addDownlink(uint32_t /*server_global_id*/, Queue* /*q*/, Pipe* /*p*/);
 
-    // Register core→leaf downlink queues so this leaf can estimate remote congestion.
+    // Remote segment registration: core -> dstLeaf downlink
     void registerCoreToLeaf(uint32_t core, uint32_t dstLeaf, Queue* q_core_to_leaf, Pipe* p_core_to_leaf);
 
-    // Choose uplink (core index) for packets toward dstLeaf.
+    // Pick the core uplink for a packet going to dstLeaf
     uint32_t chooseCore(uint32_t dstLeaf) const;
 
-    // Tuning parameters
+    // Tunables
     void setSamplingPeriod(simtime_picosec T) { _samplePeriod = T; }
     void setAlpha(double a) { _alpha = a; }
+    void setWeights(double w_to, double w_from) { _w_to = w_to; _w_from = w_from; }
+    void setEps(double eps) { _eps = eps; }
 
-    // EventSource tick
     void doNextEvent() override;
 
 private:
     void sampleOnce();
-    void ensureStarted();
 
-    // === internal state ===
-    uint32_t _leafId;
-    uint32_t _nCores;
-    uint32_t _nLeaves;
+    uint32_t _leafId, _nCores, _nLeaves;
 
-    // leaf → core uplinks (only queues matter for congestion sampling)
-    std::vector<Queue*> _uplinkQ;
+    // leaf -> core (local uplinks)
+    std::vector<Queue*> _uplinkQ; // size nCores
 
-    // core → leaf queues for each destination leaf: [dstLeaf][core]
+    // core -> leaf queues indexed [dstLeaf][core]
     std::vector<std::vector<Queue*>> _coreToLeafQ;
 
-    // congestion metric [dstLeaf][core]
+    // CONGA-style tables (EWMA of bytes-in-queue)
+    // toLeaf[dst][core]   := local leaf->core congestion toward dst leaf
+    // fromLeaf[dst][core] := remote core->dstLeaf congestion learned/sampled
+    std::vector<std::vector<double>> _toLeaf;
+    std::vector<std::vector<double>> _fromLeaf;
+
+    // Combined metric used for routing: metric = w_to*toLeaf + w_from*fromLeaf (+ jitter)
     std::vector<std::vector<double>> _metric;
 
-    // EWMA & scheduling
+    // EWMA, period, weights, tie threshold
     double _alpha;
     simtime_picosec _samplePeriod;
-    bool _started;
+    double _w_to, _w_from;
+    double _eps;
+
+    // Jitter to break symmetry
+    mutable std::mt19937 _rng;
 };

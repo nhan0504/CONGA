@@ -191,8 +191,10 @@ void conga_testbed(const ArgList &args, Logfile &logfile)
     topo.leafSwitches.reserve(N_LEAF);
     for (int leaf = 0; leaf < N_LEAF; ++leaf) {
         auto *lsw = new LeafSwitch(leaf, N_CORE, N_LEAF, EventList::Get());
-        lsw->setAlpha(0.25);
-        lsw->setSamplingPeriod(timeFromUs(50));
+        lsw->setAlpha(0.6);                               // faster EWMA
+        lsw->setSamplingPeriod(timeFromUs(5));            // more frequent feedback
+        lsw->setWeights(0.5, 0.5);                        // to/from equally
+        lsw->setEps(1e-3);                                // near-min randomization
         topo.leafSwitches.push_back(lsw);
     }
 
@@ -276,7 +278,7 @@ void conga_testbed(const ArgList &args, Logfile &logfile)
     const uint64_t TOTAL_HOST_LINKS = (uint64_t)N_LEAF * (uint64_t)N_SERVER;
     const long double totalCapacity = (long double)TOTAL_HOST_LINKS * (long double)LEAF_SPEED;
     linkspeed_bps flowRate = llround(totalCapacity * Util);
-    flowRate = llround(flowRate * 0.001);
+    flowRate = llround(flowRate * 0.01);
 
     auto *flowGen = new FlowGenerator(eh, route_gen, flowRate, AvgFlowSize, fd);
     flowGen->setEndhostQueue(LEAF_SPEED, ENDH_BUFFER);
