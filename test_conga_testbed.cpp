@@ -123,7 +123,7 @@ static void route_gen(route_t *&fwd, route_t *&rev, uint32_t &src, uint32_t &dst
     if (g_policy == "conga") {
         chosenCore = conga_conf::topo.leafSwitches[srcLeaf]->chooseCore(dstLeaf);
     } else {
-        // ECMP-ish hash
+        // ECMP hash
         chosenCore = (src * 1315423911u + dst) % N_CORE;
     }
 
@@ -191,10 +191,10 @@ void conga_testbed(const ArgList &args, Logfile &logfile)
     topo.leafSwitches.reserve(N_LEAF);
     for (int leaf = 0; leaf < N_LEAF; ++leaf) {
         auto *lsw = new LeafSwitch(leaf, N_CORE, N_LEAF, EventList::Get());
-        lsw->setAlpha(0.6);                               // faster EWMA
-        lsw->setSamplingPeriod(timeFromUs(5));            // more frequent feedback
-        lsw->setWeights(0.5, 0.5);                        // to/from equally
-        lsw->setEps(1e-3);                                // near-min randomization
+        lsw->setAlpha(0.6);                               
+        lsw->setSamplingPeriod(timeFromUs(5));           
+        lsw->setWeights(0.5, 0.5);                       
+        lsw->setEps(1e-3);                               
         topo.leafSwitches.push_back(lsw);
     }
 
@@ -267,7 +267,7 @@ void conga_testbed(const ArgList &args, Logfile &logfile)
     if (FlowDist == "pareto") fd = Workloads::PARETO;
     else if (FlowDist == "datamining") fd = Workloads::DATAMINING;
     else if (FlowDist == "enterprise") {
-        // If your tree has ENTERPRISE, use it; otherwise map to PARETO:
+        // If the tree has ENTERPRISE, use it; otherwise map to PARETO:
         #ifdef WORKLOADS_HAS_ENTERPRISE
         fd = Workloads::ENTERPRISE;
         #else
@@ -283,7 +283,7 @@ void conga_testbed(const ArgList &args, Logfile &logfile)
     auto *flowGen = new FlowGenerator(eh, route_gen, flowRate, AvgFlowSize, fd);
     flowGen->setEndhostQueue(LEAF_SPEED, ENDH_BUFFER);
     flowGen->setPrefix(g_policy + "-");
-    flowGen->setTimeLimits(0, timeFromSec(Duration)); // schedules itself
+    flowGen->setTimeLimits(0, timeFromSec(Duration)); 
 
     EventList::Get().setEndtime(timeFromSec(Duration));
 }
